@@ -1,0 +1,47 @@
+Student Information
+-------------------
+Name: Pradyumna Kaushik
+
+Directory Contents
+------------------
+The project should contain the following files,
+	1. jprobe_fault.c --> The kernel probe to detect page faults.
+	2. qsort_test.c --> A quick sort program to generate page faults.
+	3. file_io_test.c --> A program that reads from a file and writes the contents to 2 other files.
+	4. input_file.txt --> Input file to  file_io_test.c.
+	5. data_output_file.csv --> Data file fetched from kernel module using user space process. This file contains the page fault data for file_io_test.c.
+	6. data_output_file2.csv --> Data file fetched from kernel module using user space process. This file contains the page fault data for qsort_test.c.
+	7. data_output_file_graph.xlsx --> Contains scatter plot graphs for both data_output_file.csv and data_output_file2.csv.
+	8. user.c --> User program to read in data from /proc/data_file and store it in data_output_file.csv or data_output_file2.csv.	
+	9. Makefile --> A makefile to compile the source programs and generate executables.
+
+Instructions to compile the programs, run the test programs and insert the module
+---------------------------------------------------------------------------------
+1. Compile the jprobe_fault.c, qsort_test.c, file_io_test.c, user.c using the following command,
+	
+	make
+
+2. Run any of the test cases (either qsort_test.c or file_io_test.c) using the following commands,
+	
+	Run Quicksort --> ./qsort_test.o
+	Run File IO Test --> ./file_io_test.o
+
+	Each of these would print the corresponding PID of the process which can be used to insert the kernel module.
+
+3. Insert the kernel module using the following command,
+		
+	sudo insmod jprobe_fault.ko pid=<PID of the process>
+
+	Now, when page faults occur, the PID and the virtual address, at which the page fault occurred, are printed.
+
+4. Fetch the page fault data, from user process, using the following command,
+
+	./user.o
+	
+	This would create a data_output_file.csv file that contains comma separated values corresponding to the PID and virtual address.
+
+Note on the Scatter Plot
+------------------------
+1. The scatter plot of data_output_file2.csv shows that most of the page faults have occured when the process was loaded into memory. This is due to cold start penalty,
+   where the TLB is flushed out, the cache is emptied and repopulated. So initially, the TLB would not contain any entry for a page. As and when the process faults on a
+   page, the TLB is populated and the process cache is populated. After some amount of time, the cache and the TLB are hot and frequency of page faults reduces.
