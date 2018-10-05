@@ -5,6 +5,11 @@
 #include <sys/types.h>
 
 int main(){
+
+	printf("pid = %d\n",getpid());
+	syscall(333,getpid());
+	sleep(1);
+
 	int fp, fp2;
 	fp = open("/proc/data_file", O_RDONLY);
 	lseek(fp, 0, SEEK_SET);

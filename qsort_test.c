@@ -26,7 +26,8 @@ int main(){
 	int arr[10000];
 	int _iter = 0;
 	printf("pid = %d\n",getpid());
-	sleep(10);
+	syscall(333,getpid());
+	sleep(1);
 	while(_iter < 5){
 		generate_random_array(arr,10000,30);
 		qsort(arr, 10000,sizeof(int),compare);

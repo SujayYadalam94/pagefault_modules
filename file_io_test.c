@@ -6,9 +6,11 @@
 int main(){
 
 	printf("pid = %d\n", getpid());
+	syscall(333,getpid());
+	sleep(1);
+
 	FILE* fp, *fp1, *fp2;
 	int _iter = 0;
-	sleep(10);
 	while(_iter < 100){
 		fp = fopen("input_file.txt","r");
 		fp1 = fopen("somefile_output1.txt","w");

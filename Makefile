@@ -1,11 +1,13 @@
 obj-m = jprobe_fault.o
+#obj-m += va_pa_test.o 
 
 KBUILD_FLAGS += -w
 
 all:
-	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules $(KBUILD_FLAGS)
+	make -C /home/sujay/Documents/linux M=$(PWD) modules
 	gcc user.c -o user.o
 	gcc file_io_test.c -o file_io_test.o
 	gcc qsort_test.c -o qsort_test.o
+	gcc malloc_test.c -o malloc_test.o
 clean:
-	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean
+	make -C /home/sujay/Documents/linux M=$(PWD) clean
