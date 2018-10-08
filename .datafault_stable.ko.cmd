@@ -1,0 +1,1 @@
+cmd_/home/sujay/Documents/Jprobes/datafault_stable.ko := ld -r -m elf_x86_64 -T ./scripts/module-common.lds --build-id  -o /home/sujay/Documents/Jprobes/datafault_stable.ko /home/sujay/Documents/Jprobes/datafault_stable.o /home/sujay/Documents/Jprobes/datafault_stable.mod.o ;  true

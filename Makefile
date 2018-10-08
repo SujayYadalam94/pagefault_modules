@@ -1,4 +1,4 @@
-obj-m = jprobe_fault.o
+obj-m = datafault_stable.o
 #obj-m += va_pa_test.o 
 
 KBUILD_FLAGS += -w
