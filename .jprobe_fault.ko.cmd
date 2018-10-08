@@ -1,1 +1,0 @@
-cmd_/home/sujay/Documents/Jprobes/jprobe_fault.ko := ld -r -m elf_x86_64 -T ./scripts/module-common.lds --build-id  -o /home/sujay/Documents/Jprobes/jprobe_fault.ko /home/sujay/Documents/Jprobes/jprobe_fault.o /home/sujay/Documents/Jprobes/jprobe_fault.mod.o ;  true

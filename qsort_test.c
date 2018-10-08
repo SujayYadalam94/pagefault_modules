@@ -24,14 +24,12 @@ int compare(const void* a, const void* b){
 int main(){
 
 	int arr[10000];
-	int _iter = 0;
+
 	printf("pid = %d\n",getpid());
 	syscall(333,getpid());
 	sleep(1);
-	while(_iter < 5){
-		generate_random_array(arr,10000,30);
-		qsort(arr, 10000,sizeof(int),compare);
-		_iter++;
-	}
+	generate_random_array(arr,10000,30);
+	qsort(arr, 10000,sizeof(int),compare);
+
 	return 0;
 }

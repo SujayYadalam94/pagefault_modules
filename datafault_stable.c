@@ -48,6 +48,8 @@ unsigned long old_ip;
 static struct task_struct* (*find_task_by_vpid_p)(int);
 static struct mm_struct* (*get_task_mm_p)(struct task_struct *task);
 static void (*mmput_p)(struct mm_struct *);
+static void (*flush_tlb_mm_range_p)(struct mm_struct *mm, unsigned long start,
+				unsigned long end, unsigned long vmflag);
 
 //defining the handler and the entry point of the fault handler.
 static struct jprobe pgfault_jprobe = {
@@ -72,7 +74,7 @@ static struct file_operations fops = {
 };
 
 
-int make_page_entries_reserved(void)
+int make_page_entries_reserved(bool reserved)
 {
 	struct task_struct *tsk;
 	struct mm_struct *mm;
@@ -88,20 +90,13 @@ int make_page_entries_reserved(void)
 	
 	unsigned long mask = _PAGE_USER | _PAGE_PRESENT;
 	
-	/* 
-	 * find_task_by_vpid seems to be not exported from the Linux kernel.
-	 * So not able to use it directly. A workaround is to lookup the name
-	 * and use a function pointer.
-	 */
-	find_task_by_vpid_p = (void *) kallsyms_lookup_name("find_task_by_vpid");
 	tsk = find_task_by_vpid_p(pid);
 	
 	/*
 	 * Need to make sure that mm is valid before trying to access.
 	 * Previously it was tsk->mm; if the process gets killed, tsk is NULL
 	 * and tsk->mm will return in an error.
-	 */
-	get_task_mm_p = kallsyms_lookup_name("get_task_mm");
+	 */	
 	mm = get_task_mm_p(tsk);
 	if(!mm)
 		return 0;
@@ -140,8 +135,12 @@ int make_page_entries_reserved(void)
 						if((vma->vm_flags & VM_WRITE) && !(vma->vm_flags & VM_EXEC))
 						{
 							spin_lock(&mm->page_table_lock);
-							*pte = pte_set_flags(*pte, PTE_RESERVED_MASK);
+							if(reserved)
+								*pte = pte_set_flags(*pte, PTE_RESERVED_MASK);
+							else
+								*pte = pte_clear_flags(*pte, PTE_RESERVED_MASK);
 							spin_unlock(&mm->page_table_lock);
+							flush_tlb_mm_range_p(mm, address, address+PAGE_SIZE, VM_NONE);
 							count++;
 							//printk("Modified a PTE\n");
 						}
@@ -150,7 +149,6 @@ int make_page_entries_reserved(void)
 			}
 		}
 	}
-	mmput_p = (void *)kallsyms_lookup_name("mmput");
 	mmput_p(mm);
 	
 	return count;
@@ -162,16 +160,29 @@ int make_page_entries_reserved(void)
 int syscall_handler(int _pid)
 { 
     int ret = 0;
-    
-    pid = _pid;
-    printk(KERN_ALERT "Syscall intercepted pid=%d\n",pid);
-    
+        
     prev_address = 0;
+    old_prev = 0;
+    new_prev = 0;
+    old_ip = 0;
     
-    ret = make_page_entries_reserved();
-    if(ret == 0)
-    	printk(KERN_ALERT "No page table entry modified.\n");
+    printk(KERN_ALERT "Syscall intercepted pid=%d\n",_pid);
     
+    if(_pid == -1)
+   	{
+   		current->mm->cca_en = 0;
+   		ret = make_page_entries_reserved(false);
+	   	if(ret == 0)
+   			printk(KERN_ALERT "No page table entry cleared.\n");   		
+
+   		jprobe_return();
+   	}
+   	
+    pid = _pid;
+ 
+   	ret = make_page_entries_reserved(true);
+   	if(ret == 0)
+   		printk(KERN_ALERT "No page table entry modified.\n");
     jprobe_return(); 
 } 
 
@@ -302,7 +313,7 @@ static void my_do_page_fault(struct pt_regs *regs, unsigned long error_code, uns
 				  				 * need to find a better workaround
 				  				 */
 								//flush_tlb_page(vma, prev_address);
-								flush_tlb_mm_range(vma->vm_mm, prev_address, prev_address+PAGE_SIZE, VM_NONE);
+								flush_tlb_mm_range_p(vma->vm_mm, prev_address, prev_address+PAGE_SIZE, VM_NONE);
 								//__flush_tlb_all();
 	                        }
 	                    }
@@ -356,6 +367,16 @@ static int __init jprobe_init(void)
 		printk(KERN_ERR "Error: Register pid_jprobe failed: %d\n", ret);
 		return -1;
 	}
+	
+	/* 
+	 * Below symbols seem to be not exported from the Linux kernel.
+	 * So not able to use it directly. A workaround is to lookup the name
+	 * and use a function pointer.
+	 */
+	flush_tlb_mm_range_p = (void *) kallsyms_lookup_name("flush_tlb_mm_range");
+	find_task_by_vpid_p = (void *) kallsyms_lookup_name("find_task_by_vpid");
+	get_task_mm_p = kallsyms_lookup_name("get_task_mm");
+	mmput_p = (void *)kallsyms_lookup_name("mmput");
 
 //	printk(KERN_INFO "Success: Module Initiated\n");
 	return 0;
