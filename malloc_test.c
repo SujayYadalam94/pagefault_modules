@@ -24,11 +24,10 @@ int main(int argc, char* argv[])
 	*a = 1;
 	*b = 2;
 	*c = 3;
-	//printf("accessing b first %d\n", *b);
-	//printf("accessing a next %d\n", *a);
+	printf("accessing b first %d\n", *b);
+	printf("accessing a next %d\n", *a);
 	*(b+10) = 20;
-	syscall(333,-1);
-	//printf("accessing c last %d\n", *c);
+	printf("accessing c last %d\n", *c);
 	*(a+20) = 20;
 	
 }
