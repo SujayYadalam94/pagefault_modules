@@ -30,4 +30,5 @@ int main(int argc, char* argv[])
 	printf("accessing c last %d\n", *c);
 	*(a+20) = 20;
 	
+	return 0;
 }

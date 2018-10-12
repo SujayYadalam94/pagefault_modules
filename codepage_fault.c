@@ -1,6 +1,11 @@
 /*
-   Source obtained from:
+   Initial source obtained from:
    https://github.com/pradykaushik/Jprobes
+   Thanks to him.
+   
+   Note to self: Disable ASLR before testing. Runs only with Linux verions 4.14.0 and before
+   because JProbes was disabled afterwards. Linux Kernel needs to be modified as documented
+   in my OneNote page.
 */
 
 #include <linux/kernel.h>
@@ -10,7 +15,9 @@
 #include <linux/slab.h>
 #include <asm/uaccess.h>
 
-//SUJAY: Added these lines:
+/*
+	SUJAY: Added these lines:
+*/
 #include <linux/sched.h>
 #include <linux/uaccess.h>
 #include <linux/mm.h>
@@ -21,12 +28,26 @@
 #define PF_RSVD	 (1<<3)
 #define PF_INSTR (1<<4)
 
-/* Function declarations */
+/* 
+	Function declarations
+*/
 static void my_do_page_fault(struct pt_regs *regs, unsigned long error_code, unsigned long address);
 int syscall_handler(int _pid);
 ssize_t pgfault_file_read(struct file* fileptr, char* user_buffer, size_t length, loff_t* offset);
 
-//structure to hold the information of the proc file
+/*
+	Function pointers: Required because some kernel
+	symbols are not accessible although they are present
+	in the /proc/kallsyms file
+*/
+static struct task_struct* (*find_task_by_vpid_p)(int);
+static struct mm_struct* (*get_task_mm_p)(struct task_struct *task);
+static void (*mmput_p)(struct mm_struct *);
+static void (*flush_tlb_mm_range_p)(struct mm_struct *mm, unsigned long start,
+				unsigned long end, unsigned long vmflag);
+
+
+//structure to hold the page faults in a proc file
 struct proc_dir_entry* pgfault_file;
 
 //kernel buffer to store the result
@@ -34,21 +55,24 @@ static char* data_buffer = NULL;
 
 //number of bytes written to data_buffer
 static int number_of_bytes = 0;
-
-//fetching the pid from command line arguments.
-static int pid = -1;
-
-//variable to keep track of number of times proc file was read.
 static int temp_len=0;
 
-//variables to keep track of old fault address and old Instruction Pointer
-unsigned long prev_address=0,old_prev=0, new_prev=0;
+/*
+	PID of the process of interest is obtained
+	by intercepting the syscall
+*/
+static int pid = -1;
 
-static struct task_struct* (*find_task_by_vpid_p)(int);
-static struct mm_struct* (*get_task_mm_p)(struct task_struct *task);
-static void (*mmput_p)(struct mm_struct *);
-static void (*flush_tlb_mm_range_p)(struct mm_struct *mm, unsigned long start,
-				unsigned long end, unsigned long vmflag);
+static int log=0;
+
+/*
+	variables to keep track of old fault addresses.
+	History of 4 addresses is required to detect
+	repitive pattern and both the alternating pages
+*/
+unsigned long prev_address=0, old_prev=0, new_prev=0, mk_reserve_address=0;
+
+
 
 //defining the handler and the entry point of the fault handler.
 static struct jprobe pgfault_jprobe = {
@@ -72,7 +96,11 @@ static struct file_operations fops = {
 	.owner = THIS_MODULE,
 };
 
-
+/*
+	This function is called when the syscall is made.
+	This function is used to either make all the valid PTEs
+	reserved or unreserved(when exiting).
+*/
 int make_page_entries_reserved(bool reserved)
 {
 	struct task_struct *tsk;
@@ -80,28 +108,32 @@ int make_page_entries_reserved(bool reserved)
 	struct vm_area_struct *vma;
 	
 	unsigned long i,k,l,m;
-	unsigned int count = 0;
+	unsigned int num_entries_modified = 0;
 	pgd_t *pgd;
     pud_t *pud;
     pmd_t *pmd;
     pte_t *pte;
 	unsigned long address;
 	
+	/*
+		We want to ensure that we make only PTEs corresponding
+		to user pages and those pages that are present reserved.
+	*/
 	unsigned long mask = _PAGE_USER | _PAGE_PRESENT;
 	
 	tsk = find_task_by_vpid_p(pid);
 	
 	/*
-	 * Need to make sure that mm is valid before trying to access.
-	 * Previously it was tsk->mm; if the process gets killed, tsk is NULL
-	 * and tsk->mm will return in an error.
+	 	Need to make sure that mm is valid before trying to access.
+	 	Previously it was tsk->mm; if the process gets killed, tsk is NULL
+	 	and tsk->mm will return in an error.
 	 */	
 	mm = get_task_mm_p(tsk);
 	if(!mm)
 		return 0;
 	/* 
-	 * Had to remove P4D because it is not used in 4 level tables,
-	 * which is the case with current Linux kernel. Using it caused problems.
+	 	Had to remove P4D because it is not used in 4 level tables,
+	 	which is the case with current Linux kernel. Using it caused problems.
 	 */
 	for(i=0;i<PTRS_PER_PGD;i++)
 	{
@@ -128,7 +160,9 @@ int make_page_entries_reserved(bool reserved)
 					if(vma && (vma->vm_start <= address) && (vma->vm_end >= address))
 					{
 						/* 
-						 * For now, just track the code pages.
+						 	For now, just track the code pages. We dont want to track
+						 	data pages as the number of faults will increase drastically
+						 	and handling it will become difficult.
 						 */
 						if(vma->vm_flags & VM_EXEC)
 						{
@@ -139,8 +173,7 @@ int make_page_entries_reserved(bool reserved)
 								*pte = pte_clear_flags(*pte, PTE_RESERVED_MASK);
 							spin_unlock(&mm->page_table_lock);
 							flush_tlb_mm_range_p(mm, address, address+PAGE_SIZE, VM_NONE);
-							count++;
-							//printk("Modified a PTE\n");
+							num_entries_modified++;
 						}
 					}
 				}
@@ -149,12 +182,57 @@ int make_page_entries_reserved(bool reserved)
 	}
 	mmput_p(mm);
 	
-	return count;
+	return num_entries_modified;
 }
 
 /*
- * Syscall 333 intercepted by this handler
- */
+	Function to mark the PTE of a particular address as reserved.
+*/
+void mk_pte_reserved(struct vm_area_struct *vma, unsigned long address)
+{
+	pgd_t *pgd;
+	p4d_t *p4d;
+	pud_t *pud;
+	pmd_t *pmd;
+	pte_t *pte;
+
+	pgd = pgd_offset(vma->vm_mm, address);
+
+	p4d = p4d_offset(pgd, address);            
+	if (!p4d || p4d_none(*p4d))
+		return;
+	else
+	{
+		pud = pud_offset(p4d, address);
+		if(!pud || pud_none(*pud))
+			return;
+		else
+		{
+			pmd = pmd_offset(pud, address);
+			if(!pmd || pmd_none(*pmd))
+				return;
+			else
+			{
+				pte = pte_offset_kernel(pmd, address);
+				if(pte_none(*pte))
+					return;
+				else
+				{
+					spin_lock(&vma->vm_mm->page_table_lock);
+					*pte = pte_set_flags(*pte, PTE_RESERVED_MASK);
+					spin_unlock(&vma->vm_mm->page_table_lock);	
+					/*	Symbol for flushing only a page is not
+						accessible.	*/		  				
+					flush_tlb_mm_range_p(vma->vm_mm, address, address+PAGE_SIZE, VM_NONE);
+				}
+			}
+		}
+	}
+}
+
+/*
+	Syscall 333 (implemented by us) is intercepted by this handler
+*/
 int syscall_handler(int _pid)
 { 
     int ret = 0;
@@ -163,9 +241,12 @@ int syscall_handler(int _pid)
     old_prev = 0;
     new_prev = 0;
     number_of_bytes=0;
+    log=0;
     
     printk(KERN_ALERT "Syscall intercepted pid=%d\n",_pid);
     
+    /*  PID of -1 is used when you want to stop tracking the
+    	page faults for the process  */
     if(_pid == -1)
    	{
    		current->mm->cca_en = 0;
@@ -181,6 +262,7 @@ int syscall_handler(int _pid)
    	
     pid = _pid;
  
+	current->mm->cca_en = 1;
    	ret = make_page_entries_reserved(true);
    	if(ret == 0)
    		printk(KERN_ALERT "No page table entry modified.\n");
@@ -189,57 +271,83 @@ int syscall_handler(int _pid)
     jprobe_return(); 
 } 
 
-//function called when read() is called on the proc file
+/*
+	Function called when proc file is read
+*/
 ssize_t pgfault_file_read(struct file* fileptr, char* user_buffer, size_t length, loff_t* offset)
 {
 	/* Send 0 if no more data to send: temp value is decreased
 	base on the length of bytes read */
-	if(length > temp_len)
-		length = temp_len;
-	temp_len = temp_len - length;	
+	if(length > number_of_bytes)
+		length = number_of_bytes;
+	number_of_bytes = number_of_bytes - length;	
+	
 	//need to copy the contents of the data buffer to user buffer
 	copy_to_user(user_buffer, data_buffer, length);
 	return length;	
 }
 
 /* 
- * my_do_page_fault is called on a page fault before __do_page_fault
- * is invoked.
- */
+	my_do_page_fault is called on a page fault before __do_page_fault
+	is invoked.
+*/
 static void my_do_page_fault(struct pt_regs *regs, unsigned long error_code, unsigned long address)
 {
 	struct vm_area_struct *vma;
 
 	//checking if pid matches.
 	if(current->pid == pid)
-	{
-		/*
-		int size = snprintf(temp, 20, "0x%lx\n", (address & ~0xFFF));
-		number_of_bytes += (size+1);
-		temp_len = number_of_bytes;
-
-		//maybe we need to allocate memory.
-		if(data_buffer == NULL)
-			data_buffer = (char*)kzalloc(sizeof(char)*number_of_bytes, GFP_KERNEL);
-		else
-			data_buffer = (char*)krealloc(data_buffer, number_of_bytes, GFP_KERNEL);
-		strcat(data_buffer, temp);
+	{	
+		/* 
+			We are purposefully masking the lower 12 bits because that's
+			what the enclave passes to the OS in Intel SGX.
 		*/
-	
-		//need to concatenate data to the buffer.
-		char temp[50] = {0};
-				
+		address &= ~0xFFF;	
+		
+		/*
+			IMPORTANT: We are interested in tracking page faults inside a function
+			called "load_truetype_glyph" inside TT_Load_Glyph. The below sequence
+			of faults are used to detect the start of the function. We log the faults
+			only after this function is invoked.
+		*/
+		if(new_prev==0x7ffff7b53000 && prev_address==0x7ffff7b6c000 && address == 0x7ffff7b6d000)
+			log=1;
+			
 		vma = find_vma(current->mm, address);
 		if(!vma)
 			printk(KERN_INFO "virtual address:0x%x VMA not valid\n", address);
 		else if(vma->vm_start <= address)
 		{
-			if(error_code & PF_INSTR)
-				printk(KERN_INFO "0x%lx\n", (address & ~0xFFF));
+			if((error_code & PF_INSTR) && log)
+			{
+				printk(KERN_INFO "0x%lx\n", address);
+
+				/*
+					CAUTION: Do not uncomment this. Uncommenting can cause
+					segmentation fault. This is mostly because the mallocs
+					we are using. We might have to either free the memory
+					or look closer at the issue.
+				*/
+				/*
+				//need to concatenate data to the buffer.
+				char temp[50] = {0};
+		
+				int size = snprintf(temp, 20, "0x%lx\n", address);
+				number_of_bytes += (size+1);
+				temp_len = number_of_bytes;
+	
+				//maybe we need to allocate memory.
+				if(data_buffer == NULL)
+					data_buffer = (char*)kzalloc(sizeof(char)*number_of_bytes, GFP_KERNEL);
+				else
+					data_buffer = (char*)krealloc(data_buffer, number_of_bytes, GFP_KERNEL);
+				strcat(data_buffer, temp);		
+				*/
+			}		
 			
-			/* If the fault occurred with the PF_RSVD bit set, we need to 
-			 * handle the fault as the default handler is not designed to
-			 * handle this.
+			/* 
+				If the fault occurred with the PF_RSVD bit set, we need to 
+			 	handle the fault as the default handler is not cannot handle.
 			 */
 			if(error_code & PF_RSVD)
 			{
@@ -273,65 +381,37 @@ static void my_do_page_fault(struct pt_regs *regs, unsigned long error_code, uns
 	        	}			
 			}
 			
-			/* Important: below checks make sure that we don't get stuck at a particular 
-			 * address. The IP check is done because some instructions in x86 can access
-			 * 2 memory addresses. Example: MOVS or move string takes two pointers: source
-			 * address and destination address. So we need to check if Instruction pointer
-			 * is same as last fault.
-			 */
-			if((old_prev == prev_address) && (new_prev == address))
-				printk(KERN_ERR "Pattern detected\n");
-			else if(prev_address!=0 && (vma->vm_flags & VM_EXEC))
+			/*
+				When a repitative pattern is observed, we make both the pages
+				accessible. Therefore on the next fault (on a different page),
+				we need to make both the pages reserved.
+			*/
+			if(mk_reserve_address)
 			{
-				pgd_t *pgd;
-	            p4d_t *p4d;
-	            pud_t *pud;
-	            pmd_t *pmd;
-	            pte_t *pte;
-	
-	            pgd = pgd_offset(vma->vm_mm, prev_address);
-	            
-	            p4d = p4d_offset(pgd, prev_address);            
-	            if (!p4d || p4d_none(*p4d))
-	            	printk(KERN_ERR "Problem with P4D\n");
-	            else
-	            {
-	                pud = pud_offset(p4d, prev_address);
-	                if(!pud || pud_none(*pud))
-	                    printk(KERN_ERR "Problem with PUD\n");
-	                else
-	                {
-	                    pmd = pmd_offset(pud, prev_address);
-	                    if(!pmd || pmd_none(*pmd))
-	                        printk(KERN_ERR "Problem with PMD\n");
-	                    else
-	                    {
-	                        pte = pte_offset_kernel(pmd, prev_address);
-	                        if(pte_none(*pte))
-	                            printk(KERN_ERR "Problem with PTE\n");
-	                        else
-	                        {
-		                        spin_lock(&vma->vm_mm->page_table_lock);
-				  				*pte = pte_set_flags(*pte, PTE_RESERVED_MASK);
-								spin_unlock(&vma->vm_mm->page_table_lock);			  				
-				  				/* 
-				  				 * flush_tlb_page symbol not found,
-				  				 * need to find a better workaround
-				  				 */
-								//flush_tlb_page(vma, prev_address);
-								flush_tlb_mm_range_p(vma->vm_mm, prev_address, prev_address+PAGE_SIZE, VM_NONE);
-								//__flush_tlb_all();
-	                        }
-	                    }
-	                }
-	        	} 
-	        }
-        	old_prev = new_prev;
-			new_prev = prev_address;
+				mk_pte_reserved(vma, mk_reserve_address);
+	        	mk_reserve_address = 0; 
+	        }	
+	        
+			/* 
+				Important: below checks make sure that we don't get stuck at a particular 
+			 	address. 
+			*/			
 			if((old_prev == prev_address) && (new_prev == address))
-				prev_address = 0;
-			else
-				prev_address = address; 
+			{
+				mk_reserve_address = prev_address;
+			}
+			else if(prev_address!=0)
+			{
+				mk_pte_reserved(vma, prev_address);
+	        }       
+	        
+	        old_prev = new_prev;
+	        new_prev = prev_address;
+	        /* mark only code pages */
+	        if(vma->vm_flags & VM_EXEC)
+		        prev_address = address;
+		    else
+		    	prev_address = 0;
 	    }
 	}
 	jprobe_return();
@@ -367,16 +447,16 @@ static int __init jprobe_init(void)
 	}
 	
 	/* 
-	 * Below symbols seem to be not exported from the Linux kernel.
-	 * So not able to use it directly. A workaround is to lookup the name
-	 * and use a function pointer.
-	 */
+	 	Below symbols seem to be not exported from the Linux kernel.
+	 	So not able to use it directly. A workaround is to lookup the name
+	 	and use a function pointer.
+	*/
 	flush_tlb_mm_range_p = (void *) kallsyms_lookup_name("flush_tlb_mm_range");
 	find_task_by_vpid_p = (void *) kallsyms_lookup_name("find_task_by_vpid");
 	get_task_mm_p = kallsyms_lookup_name("get_task_mm");
 	mmput_p = (void *)kallsyms_lookup_name("mmput");
 
-//	printk(KERN_INFO "Success: Module Initiated\n");
+	printk(KERN_INFO "Success: Module Initiated\n");
 	return 0;
 }
 
