@@ -315,11 +315,11 @@ static void my_do_page_fault(struct pt_regs *regs, unsigned long error_code, uns
 								//flush_tlb_page(vma, prev_address);
 								flush_tlb_mm_range_p(vma->vm_mm, prev_address, prev_address+PAGE_SIZE, VM_NONE);
 								//__flush_tlb_all();
-	                        }
-	                    }
-	                }
-	        	}
-	        }
+							}
+						}
+					}
+				}
+			}
 	        
 	        //Faults on new code pages is possible but we shouldn't mark them 
 	        if(!(error_code & PF_INSTR))

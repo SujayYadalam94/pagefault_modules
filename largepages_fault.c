@@ -24,6 +24,8 @@
 #include <linux/sched.h>
 #include <linux/uaccess.h>
 #include <linux/mm.h>
+#include <linux/huge_mm.h>
+#include <linux/hugetlb.h>
 #include <asm/tlbflush.h>
 
 #define PTE_RESERVED_MASK	(_AT(pteval_t, 1) << 51)
@@ -112,6 +114,7 @@ int make_page_entries_reserved(bool reserved)
 	
 	unsigned long i,k,l,m;
 	unsigned int num_entries_modified = 0;
+	unsigned int pmd_entries_modified = 0;
 	pgd_t *pgd;
     pud_t *pud;
     pmd_t *pmd;
@@ -153,6 +156,20 @@ int make_page_entries_reserved(bool reserved)
 				pmd = (pmd_t *)pud_page_vaddr(*pud) + l;
 				if((pmd_flags(*pmd) & mask) != mask)
 					continue;
+				address = (i<<PGDIR_SHIFT) + (k<<PUD_SHIFT) + (l<<PMD_SHIFT);
+				vma = find_vma(mm, address);
+				if(vma && pmd_trans_huge(*pmd) && (transparent_hugepage_enabled(vma)) && (vma->vm_flags & VM_EXEC))
+				{
+					spin_lock(&mm->page_table_lock);
+					if(reserved)
+						*pmd = pmd_set_flags(*pmd, PTE_RESERVED_MASK);
+					else
+						*pmd = pmd_clear_flags(*pmd, PTE_RESERVED_MASK);
+					spin_unlock(&mm->page_table_lock);
+					flush_tlb_mm_range_p(mm, address, address+PAGE_SIZE, VM_NONE);
+					pmd_entries_modified++;
+					continue;
+				}
 				for(m=0;m<PTRS_PER_PTE;m++)
 				{
 					pte = (pte_t *)pmd_page_vaddr(*pmd) + m;
@@ -162,11 +179,6 @@ int make_page_entries_reserved(bool reserved)
 					vma = find_vma(mm, address);
 					if(vma && (vma->vm_start <= address) && (vma->vm_end >= address))
 					{
-						/* 
-						 	For now, just track the code pages. We dont want to track
-						 	data pages as the number of faults will increase drastically
-						 	and handling it will become difficult.
-						 */
 						if(vma->vm_flags & VM_EXEC)
 						{
 							spin_lock(&mm->page_table_lock);
@@ -183,7 +195,10 @@ int make_page_entries_reserved(bool reserved)
 			}
 		}
 	}
+	//__flush_tlb_all();
 	mmput_p(mm);
+	
+	printk(KERN_INFO "Modified %d PMD entries\n", pmd_entries_modified);
 	
 	return num_entries_modified;
 }
@@ -191,7 +206,7 @@ int make_page_entries_reserved(bool reserved)
 /*
 	Function to mark the PTE of a particular address as reserved.
 */
-void mk_pte_reserved(struct vm_area_struct *vma, unsigned long address)
+void mk_entry_reserved(struct vm_area_struct *vma, unsigned long address)
 {
 	pgd_t *pgd;
 	p4d_t *p4d;
@@ -214,6 +229,14 @@ void mk_pte_reserved(struct vm_area_struct *vma, unsigned long address)
 			pmd = pmd_offset(pud, address);
 			if(!pmd || pmd_none(*pmd))
 				return;
+			else if(pmd_trans_huge(*pmd) && (transparent_hugepage_enabled(vma)))
+			{
+				spin_lock(&vma->vm_mm->page_table_lock);
+				*pmd = pmd_set_flags(*pmd, PTE_RESERVED_MASK);
+				spin_unlock(&vma->vm_mm->page_table_lock);	 				
+				flush_tlb_mm_range_p(vma->vm_mm, address, address+PAGE_SIZE, VM_NONE);	
+				printk(KERN_INFO "PMD entry resrved\n");
+			}
 			else
 			{
 				pte = pte_offset_kernel(pmd, address);
@@ -313,9 +336,7 @@ static void my_do_page_fault(struct pt_regs *regs, unsigned long error_code, uns
 			of faults are used to detect the start of the function. We log the faults
 			only after this function is invoked.
 		*/
-		//for dynamic libfreetype linking, use below
 		//if(new_prev==0x7ffff7b53000 && prev_address==0x7ffff7b6c000 && address == 0x7ffff7b6d000)
-		//for static freetype library linking, use below
 		if(new_prev==0x433000 && prev_address==0x434000 && address == 0x431000)
 			log=1;
 			
@@ -373,7 +394,14 @@ static void my_do_page_fault(struct pt_regs *regs, unsigned long error_code, uns
 	                if(!pud_none(*pud))
     	            {
     	                pmd = pmd_offset(pud, address);
-	                    if(!pmd_none(*pmd))
+    	                if(pmd_trans_huge(*pmd) && (transparent_hugepage_enabled(vma)))
+    	                {
+    	                	spin_lock(&vma->vm_mm->page_table_lock);
+    	                	*pmd = pmd_clear_flags(*pmd, PTE_RESERVED_MASK);
+    	                	spin_unlock(&vma->vm_mm->page_table_lock);
+    	                	printk(KERN_INFO "PMD entry cleared\n");
+    	                }
+	                    else if(!pmd_none(*pmd))
 	                    {
 	                        pte = pte_offset_kernel(pmd, address);
 	                        if(!pte_none(*pte))
@@ -394,7 +422,7 @@ static void my_do_page_fault(struct pt_regs *regs, unsigned long error_code, uns
 			*/
 			if(mk_reserve_address)
 			{
-				mk_pte_reserved(vma, mk_reserve_address);
+				mk_entry_reserved(vma, mk_reserve_address);
 	        	mk_reserve_address = 0; 
 	        }	
 	        
@@ -408,7 +436,7 @@ static void my_do_page_fault(struct pt_regs *regs, unsigned long error_code, uns
 			}
 			else if(prev_address!=0)
 			{
-				mk_pte_reserved(vma, prev_address);
+				mk_entry_reserved(vma, prev_address);
 	        }       
 	        
 	        old_prev = new_prev;
