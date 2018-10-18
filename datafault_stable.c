@@ -36,13 +36,15 @@ static char* data_buffer = NULL;
 static int number_of_bytes = 0;
 
 //fetching the pid from command line arguments.
-static int pid=0;
+static int pid=-1;
+
+static int log = 0;
 
 //variable to keep track of number of times proc file was read.
 static int temp_len=0;
 
 //variables to keep track of old fault address and old Instruction Pointer
-unsigned long prev_address=0,old_prev=0, new_prev=0;
+unsigned long prev_address=0,old_prev=0, new_prev=0, mk_reserve_address=0;
 unsigned long old_ip;
 
 static struct task_struct* (*find_task_by_vpid_p)(int);
@@ -122,7 +124,7 @@ int make_page_entries_reserved(bool reserved)
 				for(m=0;m<PTRS_PER_PTE;m++)
 				{
 					pte = (pte_t *)pmd_page_vaddr(*pmd) + m;
-					if(((pte_flags(*pte) & mask) != mask) || !(pte_flags(*pte) & _PAGE_BIT_RW))
+					if((pte_flags(*pte) & mask) != mask)
 						continue;
 					address = (i<<PGDIR_SHIFT) + (k<<PUD_SHIFT) + (l<<PMD_SHIFT) + (m<<PAGE_SHIFT);
 					vma = find_vma(mm, address);
@@ -142,7 +144,6 @@ int make_page_entries_reserved(bool reserved)
 							spin_unlock(&mm->page_table_lock);
 							flush_tlb_mm_range_p(mm, address, address+PAGE_SIZE, VM_NONE);
 							count++;
-							//printk("Modified a PTE\n");
 						}
 					}
 				}
@@ -155,6 +156,52 @@ int make_page_entries_reserved(bool reserved)
 }
 
 /*
+	Function to mark the PTE of a particular address as reserved.
+*/
+void mk_pte_reserved(struct vm_area_struct *vma, unsigned long address)
+{
+	pgd_t *pgd;
+	p4d_t *p4d;
+	pud_t *pud;
+	pmd_t *pmd;
+	pte_t *pte;
+
+	pgd = pgd_offset(vma->vm_mm, address);
+
+	p4d = p4d_offset(pgd, address);            
+	if (!p4d || p4d_none(*p4d))
+		return;
+	else
+	{
+		pud = pud_offset(p4d, address);
+		if(!pud || pud_none(*pud))
+			return;
+		else
+		{
+			pmd = pmd_offset(pud, address);
+			if(!pmd || pmd_none(*pmd))
+				return;
+			else
+			{
+				pte = pte_offset_kernel(pmd, address);
+				if(pte_none(*pte))
+					return;
+				else
+				{
+					spin_lock(&vma->vm_mm->page_table_lock);
+					*pte = pte_set_flags(*pte, PTE_RESERVED_MASK);
+					spin_unlock(&vma->vm_mm->page_table_lock);	
+					/*	Symbol for flushing only a page is not
+						accessible.	*/		  				
+					flush_tlb_mm_range_p(vma->vm_mm, address, address+PAGE_SIZE, VM_NONE);
+				}
+			}
+		}
+	}
+}
+
+
+/*
  * Syscall 333 intercepted by this handler
  */
 int syscall_handler(int _pid)
@@ -164,7 +211,8 @@ int syscall_handler(int _pid)
     prev_address = 0;
     old_prev = 0;
     new_prev = 0;
-    old_ip = 0;
+    mk_reserve_address = 0;
+    log=0;
     
     printk(KERN_ALERT "Syscall intercepted pid=%d\n",_pid);
     
@@ -209,26 +257,19 @@ static void my_do_page_fault(struct pt_regs *regs, unsigned long error_code, uns
 
 	//checking if pid matches.
 	if(current->pid == pid)
-	{
-		//need to concatenate data to the buffer.
-		char temp[50] = {0};
-		int size = snprintf(temp, 50, "virtual_address: 0x%lx, error_code=0x%lx\n", address, error_code);
-		number_of_bytes += (size+1);
-		temp_len = number_of_bytes;
-
-		//maybe we need to allocate memory.
-		if(data_buffer == NULL)
-			data_buffer = (char*)kzalloc(sizeof(char)*number_of_bytes, GFP_KERNEL);
-		else
-			data_buffer = (char*)krealloc(data_buffer, number_of_bytes, GFP_KERNEL);
-		strcat(data_buffer, temp);
-				
+	{			
+		address &= ~0xFFF;
+		
+		if(new_prev==0x7ffff7dd3000 && prev_address==0x7fffffffd000 && address == 0x7ffff7792000)
+			log=1;
+			
 		vma = find_vma(current->mm, address);
 		if(!vma)
 			printk(KERN_INFO "virtual address:0x%x VMA not valid\n", address);
 		else if(vma->vm_start <= address)
 		{
-			printk(KERN_INFO "Virtual addr:0x%lx\n", address);
+			if(log)
+				printk(KERN_INFO "0x%lx\n", address);
 			
 			/* If the fault occurred with the PF_RSVD bit set, we need to 
 			 * handle the fault as the default handler is not designed to
@@ -265,6 +306,11 @@ static void my_do_page_fault(struct pt_regs *regs, unsigned long error_code, uns
 	        	}			
 			}
 			
+			if(mk_reserve_address)
+			{
+				mk_pte_reserved(vma, mk_reserve_address);
+	        	mk_reserve_address = 0; 
+	        }	
 			/* Important: below checks make sure that we don't get stuck at a particular 
 			 * address. The IP check is done because some instructions in x86 can access
 			 * 2 memory addresses. Example: MOVS or move string takes two pointers: source
@@ -273,67 +319,20 @@ static void my_do_page_fault(struct pt_regs *regs, unsigned long error_code, uns
 			 */
 			if((old_prev == prev_address) && (new_prev == address))
 			{
-				printk(KERN_ERR "Pattern detected\n");
+				mk_reserve_address = prev_address;
 			}
 			else if(prev_address!=0)
 			{
-				pgd_t *pgd;
-	            p4d_t *p4d;
-	            pud_t *pud;
-	            pmd_t *pmd;
-	            pte_t *pte;
-	
-	            pgd = pgd_offset(vma->vm_mm, prev_address);
-	            
-	            p4d = p4d_offset(pgd, prev_address);            
-	            if (!p4d || p4d_none(*p4d))
-	            	printk(KERN_ERR "Problem with P4D\n");
-	            else
-	            {
-	                pud = pud_offset(p4d, prev_address);
-	                if(!pud || pud_none(*pud))
-	                    printk(KERN_ERR "Problem with PUD\n");
-	                else
-	                {
-	                    pmd = pmd_offset(pud, prev_address);
-	                    if(!pmd || pmd_none(*pmd))
-	                        printk(KERN_ERR "Problem with PMD\n");
-	                    else
-	                    {
-	                        pte = pte_offset_kernel(pmd, prev_address);
-	                        if(pte_none(*pte))
-	                            printk(KERN_ERR "Problem with PTE\n");
-	                        else
-	                        {
-		                        spin_lock(&vma->vm_mm->page_table_lock);
-				  				*pte = pte_set_flags(*pte, PTE_RESERVED_MASK);
-								spin_unlock(&vma->vm_mm->page_table_lock);			  				
-				  				/* 
-				  				 * flush_tlb_page symbol not found,
-				  				 * need to find a better workaround
-				  				 */
-								//flush_tlb_page(vma, prev_address);
-								flush_tlb_mm_range_p(vma->vm_mm, prev_address, prev_address+PAGE_SIZE, VM_NONE);
-								//__flush_tlb_all();
-							}
-						}
-					}
-				}
+				mk_pte_reserved(vma, prev_address);
 			}
-	        
+	          
+	        old_prev = new_prev;
+		    new_prev = prev_address;
 	        //Faults on new code pages is possible but we shouldn't mark them 
-	        if(!(error_code & PF_INSTR))
-	        {
-       	        old_prev = new_prev;
-		        new_prev = prev_address;
+	        if(!(vma->vm_flags & VM_EXEC))
 		        prev_address = address;     
-		    }
 		    else
-		    {
-    	        old_prev = new_prev;
-		        new_prev = prev_address;
 		    	prev_address = 0;
-	    	}
 		}
 	}
 	jprobe_return();

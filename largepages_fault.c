@@ -168,6 +168,12 @@ int make_page_entries_reserved(bool reserved)
 					spin_unlock(&mm->page_table_lock);
 					flush_tlb_mm_range_p(mm, address, address+PAGE_SIZE, VM_NONE);
 					pmd_entries_modified++;
+					/*
+						Temporary workaround to log if largepages
+						are used. Since the pattern never matches, addresses
+						will not be logged.
+					*/
+					log=1;
 					continue;
 				}
 				for(m=0;m<PTRS_PER_PTE;m++)

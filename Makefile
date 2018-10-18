@@ -1,6 +1,6 @@
-obj-m += largepages_fault.o
-obj-m += codepage_fault.o
-#obj-m = datafault_stable.o
+#obj-m += largepages_fault.o
+#obj-m += codepage_fault.o
+obj-m = datafault_stable.o
 
 KBUILD_FLAGS += -w
 
