@@ -91,6 +91,7 @@ int make_page_entries_reserved(bool reserved)
     pmd_t *pmd;
     pte_t *pte;
 	unsigned long address;
+	unsigned int pmd_entries_modified = 0;
 	
 	unsigned long mask = _PAGE_USER | _PAGE_PRESENT;
 	
@@ -123,6 +124,26 @@ int make_page_entries_reserved(bool reserved)
 				pmd = (pmd_t *)pud_page_vaddr(*pud) + l;
 				if((pmd_flags(*pmd) & mask) != mask)
 					continue;
+				address = (i<<PGDIR_SHIFT) + (k<<PUD_SHIFT) + (l<<PMD_SHIFT);
+				vma = find_vma(mm, address);
+				if(vma && pmd_trans_huge(*pmd))
+				{
+					spin_lock(&mm->page_table_lock);
+					if(reserved)
+						*pmd = pmd_set_flags(*pmd, PTE_RESERVED_MASK);
+					else
+						*pmd = pmd_clear_flags(*pmd, PTE_RESERVED_MASK);
+					spin_unlock(&mm->page_table_lock);
+					flush_tlb_mm_range_p(mm, address, address+PAGE_SIZE, VM_NONE);
+					pmd_entries_modified++;
+					/*
+						Temporary workaround to log if largepages
+						are used. Since the pattern never matches, addresses
+						will not be logged.
+					*/
+					log=1;
+					continue;
+				}
 				for(m=0;m<PTRS_PER_PTE;m++)
 				{
 					pte = (pte_t *)pmd_page_vaddr(*pmd) + m;
@@ -154,6 +175,7 @@ int make_page_entries_reserved(bool reserved)
 	}
 	mmput_p(mm);
 	
+	printk(KERN_INFO "Modified %d PMD entries\n", pmd_entries_modified);
 	return count;
 }
 
@@ -183,6 +205,14 @@ void mk_pte_reserved(struct vm_area_struct *vma, unsigned long address)
 			pmd = pmd_offset(pud, address);
 			if(!pmd || pmd_none(*pmd))
 				return;
+			else if(pmd_trans_huge(*pmd))
+			{
+				spin_lock(&vma->vm_mm->page_table_lock);
+				*pmd = pmd_set_flags(*pmd, PTE_RESERVED_MASK);
+				spin_unlock(&vma->vm_mm->page_table_lock);	 				
+				flush_tlb_mm_range_p(vma->vm_mm, address, address+PAGE_SIZE, VM_NONE);	
+				printk(KERN_INFO "PMD entry resrved\n");
+			}
 			else
 			{
 				pte = pte_offset_kernel(pmd, address);
@@ -268,7 +298,7 @@ static void my_do_page_fault(struct pt_regs *regs, unsigned long error_code, uns
 			for the Hunspell attack, then use the second if.
 		*/
 		//if(new_prev==0x7ffff7dd3000 && prev_address==0x7fffffffd000 && address == 0x7ffff7792000)
-		//if(new_prev==0x616000 && prev_address==0x7ffff7fd0000 && address==0x7ffff7dd6000)
+		if(new_prev==0x616000 && prev_address==0x7ffff7fd0000 && address==0x7ffff7dd6000)
 			log=1;
 			
 		vma = find_vma(current->mm, address);
@@ -276,7 +306,7 @@ static void my_do_page_fault(struct pt_regs *regs, unsigned long error_code, uns
 			printk(KERN_INFO "virtual address:0x%x VMA not valid\n", address);
 		else if(vma->vm_start <= address)
 		{
-			if(log)
+			if(log && !(error_code & PF_INSTR))
 				printk(KERN_INFO "0x%lx\n", address);
 
 			
@@ -301,7 +331,15 @@ static void my_do_page_fault(struct pt_regs *regs, unsigned long error_code, uns
 	                if(!pud_none(*pud))
     	            {
     	                pmd = pmd_offset(pud, address);
-	                    if(!pmd_none(*pmd))
+    	                if(pmd_trans_huge(*pmd))
+    	                // && (transparent_hugepage_enabled(vma)))
+    	                {
+    	                	spin_lock(&vma->vm_mm->page_table_lock);
+    	                	*pmd = pmd_clear_flags(*pmd, PTE_RESERVED_MASK);
+    	                	spin_unlock(&vma->vm_mm->page_table_lock);
+    	                	printk(KERN_INFO "PMD entry cleared\n");
+    	                }
+	                    else if(!pmd_none(*pmd))
 	                    {
 	                        pte = pte_offset_kernel(pmd, address);
 	                        if(!pte_none(*pte))
@@ -343,7 +381,7 @@ static void my_do_page_fault(struct pt_regs *regs, unsigned long error_code, uns
 	        old_prev = new_prev;
 		    new_prev = prev_address;
 	        //Faults on new code pages is possible but we shouldn't mark them 
-	        if(!(vma->vm_flags & VM_EXEC))
+	        if(!(error_code & PF_INSTR))
 		        prev_address = address;     
 		    else
 		    	prev_address = 0;

@@ -5,3 +5,4 @@
 *.swp
 *.mk
 *.order
+*.mod.c

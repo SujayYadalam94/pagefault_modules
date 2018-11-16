@@ -158,7 +158,13 @@ int make_page_entries_reserved(bool reserved)
 					continue;
 				address = (i<<PGDIR_SHIFT) + (k<<PUD_SHIFT) + (l<<PMD_SHIFT);
 				vma = find_vma(mm, address);
-				if(vma && pmd_trans_huge(*pmd) && (transparent_hugepage_enabled(vma)) && (vma->vm_flags & VM_EXEC))
+				if(vma && pmd_trans_huge(*pmd) && (vma->vm_flags & VM_EXEC))
+				/*
+					If Transparent huge pages are not enabled to "always", then
+					the below flag might not be set. I should be using || instead
+					of &&.
+				*/
+				//&& (transparent_hugepage_enabled(vma)) 
 				{
 					spin_lock(&mm->page_table_lock);
 					if(reserved)
@@ -235,7 +241,8 @@ void mk_entry_reserved(struct vm_area_struct *vma, unsigned long address)
 			pmd = pmd_offset(pud, address);
 			if(!pmd || pmd_none(*pmd))
 				return;
-			else if(pmd_trans_huge(*pmd) && (transparent_hugepage_enabled(vma)))
+			else if(pmd_trans_huge(*pmd))
+			// && (transparent_hugepage_enabled(vma)))
 			{
 				spin_lock(&vma->vm_mm->page_table_lock);
 				*pmd = pmd_set_flags(*pmd, PTE_RESERVED_MASK);
@@ -400,7 +407,8 @@ static void my_do_page_fault(struct pt_regs *regs, unsigned long error_code, uns
 	                if(!pud_none(*pud))
     	            {
     	                pmd = pmd_offset(pud, address);
-    	                if(pmd_trans_huge(*pmd) && (transparent_hugepage_enabled(vma)))
+    	                if(pmd_trans_huge(*pmd))
+    	                // && (transparent_hugepage_enabled(vma)))
     	                {
     	                	spin_lock(&vma->vm_mm->page_table_lock);
     	                	*pmd = pmd_clear_flags(*pmd, PTE_RESERVED_MASK);

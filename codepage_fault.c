@@ -8,6 +8,8 @@
    in my OneNote page.
    
    echo 0 | sudo tee /proc/sys/kernel/randomize_va_space
+   mount -t hugetlbfs none /mnt/hugetlbfs
+   echo 25 > /proc/sys/vm/nr_hugepages
 
 */
 
